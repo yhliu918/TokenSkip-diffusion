@@ -1,6 +1,7 @@
 import torch
 import tqdm
 from transformers import StoppingCriteria, GenerationConfig
+from llada import generate_llada
 
 class KeyWordsCriteria(StoppingCriteria):
     def __init__(self, stop_id_sequences, tokenizer, prompt_length):
@@ -29,7 +30,7 @@ class KeyWordsCriteria(StoppingCriteria):
         return all(sequences_should_be_stopped)
     
 @torch.no_grad()
-def generate_completions(model, tokenizer, prompts, batch_size=1, stop_id_sequences=None, end_of_generation_id_sequence=None, disable_tqdm=False, **generation_kwargs):
+def generate_completions(model, tokenizer, prompts, batch_size=1, stop_id_sequences=None, end_of_generation_id_sequence=None,local_rank=None,disable_tqdm=False, **generation_kwargs):
     generations = []
     finish_completion = []
     if not disable_tqdm:
@@ -40,68 +41,108 @@ def generate_completions(model, tokenizer, prompts, batch_size=1, stop_id_sequen
 
     if end_of_generation_id_sequence is not None:
         end_of_generation_sequence = tokenizer.decode(end_of_generation_id_sequence)
-
+        
     num_return_sequences = generation_kwargs.get("num_return_sequences", 1)
-    generation_kwargs['use_cache'] = True
+    generation_kwargs['use_cache'] = False
     for i in range(0, len(prompts), batch_size):
         batch_prompts = prompts[i:i+batch_size]
-        tokenized_prompts = tokenizer(batch_prompts, padding="longest", return_tensors="pt", add_special_tokens='chatglm2' in str(model.__class__))
+        # print(batch_prompts)
+        
+        tokenized_prompts = tokenizer(batch_prompts, padding="longest", return_tensors="pt", add_special_tokens=False)
         batch_input_ids = tokenized_prompts.input_ids
         attention_mask = tokenized_prompts.attention_mask
 
-        if model.device.type == "cuda":
-            batch_input_ids = batch_input_ids.cuda()
-            attention_mask = attention_mask.cuda()
+        # if model.device.type == "cuda":
+        #     batch_input_ids = batch_input_ids.cuda()
+        #     attention_mask = attention_mask.cuda()
+        inputs = tokenized_prompts.to(f"cuda:{local_rank}")
+        # print(local_rank)
 
         batch_finish_completion = [False] * len(batch_prompts) * num_return_sequences
         try:
-            batch_outputs = model.generate(
-                input_ids=batch_input_ids,
-                attention_mask=attention_mask,
-                stopping_criteria=[KeyWordsCriteria(stop_id_sequences, tokenizer, batch_input_ids.size(1))] if stop_id_sequences else None,
-                pad_token_id=tokenizer.eos_token_id,
-                **generation_kwargs
+            outputs = generate_llada(
+                model,
+                {"input_ids": inputs.input_ids, "attention_mask": inputs.attention_mask},
+                mask_id=128108,
+                denoising_steps=512,
+                gen_length=512,
+                block_length=32,
+                temperature=0,
+                cfg_scale=0,
+                remasking='low_confidence',
             )
 
-            # the stopping criteria is applied at batch level, so if other examples are not stopped, the entire batch will continue to generate.
-            # so some outputs still have the stop sequence, which we need to remove.
-            if stop_id_sequences:
-                for output_idx in range(batch_outputs.shape[0]):
-                    finish = False
-                    for token_idx in range(batch_input_ids.shape[1], batch_outputs.shape[1]):
-                        if any(tokenizer.decode(batch_outputs[output_idx, token_idx: token_idx + len(stop_sequence) + 3]).startswith(stop_sequence) for stop_sequence in stop_sequences):
-                            if end_of_generation_id_sequence is not None and tokenizer.decode(batch_outputs[output_idx, token_idx: token_idx + len(end_of_generation_id_sequence) + 3]).startswith(end_of_generation_sequence):
-                                batch_finish_completion[output_idx] = True
-                            batch_outputs[output_idx, token_idx:] = tokenizer.pad_token_id
-                            break
+            # 使用批量解码
+            batch_outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            batch_prompts_decoded = tokenizer.batch_decode(batch_input_ids, skip_special_tokens=True)
 
-            # remove the prompt from the output
-            # we need to re-encode the prompt because we need to make sure the special tokens are treated the same way as in the outputs.
-            # we changed our previous way of truncating the output token ids dicrectly because some tokenizer (e.g., llama) won't add space token before the first token.
-            # space is important for some tasks (e.g., code completion).
-            batch_outputs = tokenizer.batch_decode(batch_outputs, skip_special_tokens=True)
-            batch_prompts = tokenizer.batch_decode(batch_input_ids, skip_special_tokens=True)
-            # duplicate the prompts to match the number of return sequences
-            batch_prompts = [prompt for prompt in batch_prompts for _ in range(num_return_sequences)]
+            # 生成的结果去掉提示部分
+            batch_prompts_decoded = [prompt for prompt in batch_prompts_decoded for _ in range(num_return_sequences)]
             batch_generations = [
-                output[len(prompt):] for prompt, output in zip(batch_prompts, batch_outputs)
+                output[len(prompt):] for prompt, output in zip(batch_prompts_decoded, batch_outputs)
             ]
+            batch_finish_completion = [True] * len(batch_generations)
+            # print(num_return_sequences, batch_finish_completion)
+
+            generations += batch_generations
+            finish_completion += batch_finish_completion
+
+            if not disable_tqdm:
+                progress.update(len(batch_prompts) // num_return_sequences)
+
         except Exception as e:
-            print("Error when generating completions for batch:")
-            print(batch_prompts)
-            print("Error message:")
-            print(e)
-            print("Use empty string as the completion.")
-            batch_generations = [""] * len(batch_prompts) * num_return_sequences
-
-        generations += batch_generations
-        finish_completion += batch_finish_completion
-
-        if not disable_tqdm:
-            progress.update(len(batch_prompts)//num_return_sequences)
+            print(f"Error during generation: {e}", flush=True)
 
     assert len(generations) == len(prompts) * num_return_sequences, "number of generations should be equal to number of prompts * num_return_sequences"
     return generations, finish_completion
+
+    # num_return_sequences = generation_kwargs.get("num_return_sequences", 1)
+    # generation_kwargs['use_cache'] = False
+    # for i in range(0, len(prompts), batch_size):
+    #     batch_prompts = prompts[i:i+batch_size]
+    #     template = [dict(role="HUMAN", content="{problem}")]
+    #     text = template.copy()
+    #     text[0]['content'] = text[0]['content'].format(problem=batch_prompts[0])
+    #     messages = tokenizer.apply_chat_template(text, add_generation_prompt=True, tokenize=False)
+    #     # print('message:' , messages)
+    #     tokenize_kwargs = dict(
+    #                 return_tensors='pt',
+    #                 padding=True,
+    #                 truncation=True,
+    #                 add_special_tokens=False,
+    #                 max_length=4096
+    #             )
+    #     tokens = tokenizer.batch_encode_plus([messages], **tokenize_kwargs)
+    #     tokens = {k: v.to(model.device) for k, v in tokens.items()}
+    #     gen_len = 512
+    #     block_len = 32
+        
+    #     outputs = generate_llada(
+    #             model,
+    #             tokens, # L -> 1, L
+    #             mask_id=128108,
+    #             denoising_steps=gen_len,
+    #             gen_length=gen_len,
+    #             block_length=block_len,
+    #             temperature=0,
+    #             cfg_scale=0,
+    #             remasking='low_confidence',
+    #     )
+    #     batch_outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+    #     batch_generations = [
+    #         output[len(prompt):] for prompt, output in zip(batch_prompts, batch_outputs)
+    #     ]
+    #     batch_finish_completion = [True]
+
+    #     generations += batch_generations
+    #     finish_completion += batch_finish_completion
+
+    #     if not disable_tqdm:
+    #         progress.update(len(batch_prompts)//num_return_sequences)
+
+    # assert len(generations) == len(prompts) * num_return_sequences, "number of generations should be equal to number of prompts * num_return_sequences"
+    # return generations, finish_completion
 
 
 @torch.no_grad()
