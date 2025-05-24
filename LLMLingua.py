@@ -23,8 +23,8 @@ def save_jsonl(data, output_path):
             line = json.dumps(item, ensure_ascii=False)
             f.write(line + '\n')
 
-def filter_correct_outputs(input_path="outputs/Qwen2.5-7B-Instruct/gsm8k/7b/Original/samples/predictions.jsonl",
-                           output_path="outputs/Qwen2.5-7B-Instruct/gsm8k/7b/Original/samples/predictions_correct.jsonl"):
+def filter_correct_outputs(input_path="outputs/LLaDA-8B-Base/gsm8k/8b/Original/samples/predictions.jsonl",
+                           output_path="outputs/LLaDA-8B-Base/gsm8k/8b/Original/samples/predictions_correct.jsonl"):
     """
     Filter the correct outputs from the data.
     """
@@ -37,8 +37,8 @@ def filter_correct_outputs(input_path="outputs/Qwen2.5-7B-Instruct/gsm8k/7b/Orig
     save_jsonl(correct_data, output_path)
 
 
-def filter_formatted_outputs(input_path="outputs/Qwen2.5-7B-Instruct/gsm8k/7b/Original/samples/predictions_correct.jsonl",
-                             output_path="outputs/Qwen2.5-7B-Instruct/gsm8k/7b/Original/samples/predictions_formatted.jsonl", model_type="qwen"):
+def filter_formatted_outputs(input_path="outputs/LLaDA-8B-Base/gsm8k/8b/Original/samples/predictions_correct.jsonl",
+                             output_path="outputs/LLaDA-8B-Base/gsm8k/8b/Original/samples/predictions_formatted.jsonl", model_type="qwen"):
     """
     Filter the formatted outputs from the data. Extract COT from th outputs.
     """
@@ -54,19 +54,23 @@ def filter_formatted_outputs(input_path="outputs/Qwen2.5-7B-Instruct/gsm8k/7b/Or
                 formatted_data.append(data[i])
         elif model_type == "qwen":
             formatted_data.append(data[i])
+        elif model_type == "llada":
+            formatted_data.append(data[i])
         else:
             raise ValueError(f"Model Type {model_type} is not supported.")
     print(f"Original Samples: {len(data)}, Formatted Samples: {len(formatted_data)}")
     save_jsonl(formatted_data, output_path)
 
 def LLMLingua(data, compression_ratio=0.5, model_type="qwen",
-              llmlingua_path="/your_model_path/llmlingua-2-xlm-roberta-large-meetingbank"):
+              llmlingua_path="/cpfs02/user/yihao/llmlingua-2-xlm-roberta-large-meetingbank"):
     """
     Compress the CoT outputs with LLMLingua-2.
     """
     if model_type == "llama3":
         cot_type = "cot"
     elif model_type == "qwen":
+        cot_type = "model_output"
+    elif model_type == "llada":
         cot_type = "model_output"
     else:
         raise ValueError(f"Model Type {model_type} is not supported.")
@@ -81,6 +85,8 @@ def LLMLingua(data, compression_ratio=0.5, model_type="qwen",
         if model_type == "llama3":
             compressed_prompt = llm_lingua.compress_prompt(cot_output, rate=compression_ratio, force_tokens=['Step', ':'], force_reserve_digit=True, drop_consecutive=True)
         elif model_type == "qwen":
+            compressed_prompt = llm_lingua.compress_prompt(cot_output, rate=compression_ratio)
+        elif model_type == "llada":
             compressed_prompt = llm_lingua.compress_prompt(cot_output, rate=compression_ratio)
         else:
             raise ValueError(f"Model Type {model_type} is not supported.")
@@ -101,8 +107,8 @@ def LLMLingua(data, compression_ratio=0.5, model_type="qwen",
     return compressed_data
 
 
-def compress_cot_outputs(input_path="outputs/Qwen2.5-7B-Instruct/gsm8k/7b/Original/samples/predictions_formatted.jsonl",
-                         output_dir="outputs/Qwen2.5-7B-Instruct/gsm8k/7b/Compression", model_type="qwen",
+def compress_cot_outputs(input_path="outputs/LLaDA-8B-Base/gsm8k/8b/Original/samples/predictions_formatted.jsonl",
+                         output_dir="outputs/LLaDA-8B-Base/gsm8k/8b/Compression", model_type="qwen",
                          llmlingua_path="llmlingua-2-xlm-roberta-large-meetingbank"):
     """
     Compress the CoT outputs with various compression ratios using LLMLingua-2.
@@ -123,8 +129,8 @@ def get_average_compress_rate(data):
     print(f"Average Compression Rate: {compress_rate}")
 
 
-def data_processing_gsm8k(input_dir="outputs/Qwen2.5-7B-Instruct/gsm8k/7b/", model_type="qwen",
-                          llmlingua_path="/your_model_path/llmlingua-2-xlm-roberta-large-meetingbank"):
+def data_processing_gsm8k(input_dir="outputs/LLaDA-8B-Base/gsm8k/8b/", model_type="qwen",
+                          llmlingua_path="/cpfs02/user/yihao/llmlingua-2-xlm-roberta-large-meetingbank"):
     """
     The overall pipeline to process the GSM8K data.
     """
